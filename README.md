@@ -221,17 +221,19 @@ Retrieves detailed information for one or more Gong calls by ID(s). Accepts eith
 
 Finds all Gong calls where a specific email address participated.
 
-**Important Implementation Note:** The Gong API was not reliably returning results filtered by participant directly. This tool works by:
-1. Fetching calls from the standard `/calls` endpoint (same endpoint used by `list_calls`)
-2. The API returns participant (`parties`) data for each call
-3. Filtering the results client-side to find calls where the email address matches
+**Important Implementation Note:** This tool uses the `/calls/extensive` endpoint which includes participant data. It works by:
+1. Fetching calls from the `/calls/extensive` endpoint with date range filtering
+2. Requesting party information via the `contentSelector.exposedFields.parties` parameter
+3. Handling pagination automatically using cursor-based pagination to fetch all results
+4. Filtering the results client-side to find calls where the email address matches
+5. Returning only essential fields (id, title, scheduled, started, duration, url, direction, system, scope, media, language, parties) to keep response size minimal
 
-**Date Range Behavior:** This tool uses the same default behavior as `list_calls` - if no date range is specified, the Gong API's default is used (typically recent calls). You can provide explicit `fromDateTime` and `toDateTime` parameters to search a specific date range.
+**Date Range Behavior:** If no date range is specified, it defaults to the **last 7 days** to keep response sizes manageable and conversations efficient. You can provide explicit `fromDateTime` and `toDateTime` parameters to search a specific date range for historical data.
 
 ```typescript
 {
   name: "get_calls_for_email",
-  description: "Retrieve Gong calls where a specific email address participated, with optional date range filtering. Returns full call details including title, participants, duration, and other call metadata. Uses the same API endpoint as list_calls and filters results client-side for the email address.",
+  description: "Retrieve Gong calls where a specific email address participated, with optional date range filtering. Returns essential call details including title, participants, duration, and URL. Uses the /calls/extensive API endpoint with date range filtering and filters results client-side for the email address. Defaults to searching the last 7 days if no date range is provided.",
   inputSchema: {
     type: "object",
     properties: {

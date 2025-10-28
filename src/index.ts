@@ -68,6 +68,21 @@ interface GongListCallsResponse {
   calls: GongCall[];
 }
 
+interface GongExtensiveCallsResponse {
+  requestId: string;
+  records: {
+    totalRecords: number;
+    currentPageSize: number;
+    currentPageNumber: number;
+    cursor?: string;
+  };
+  calls: Array<{
+    metaData: GongCall;
+    parties?: GongParty[];
+    [key: string]: any;
+  }>;
+}
+
 interface GongRetrieveTranscriptsResponse {
   transcripts: GongTranscript[];
 }
@@ -247,20 +262,73 @@ class GongClient {
   }
 
   async getCallsForEmail(emailAddress: string, fromDateTime?: string, toDateTime?: string): Promise<GongCall[]> {
-    // Use the same listCalls method that works reliably
-    // Pass through date parameters as-is (no defaults), matching list_calls behavior
-    const response = await this.listCalls(fromDateTime, toDateTime);
+    // Use /calls/extensive endpoint which includes party information
+    // Default to last 7 days if no date range provided (keep response size manageable)
+    const now = new Date();
+    const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
 
-    // Filter calls client-side to find those with the matching email
+    const effectiveFromDateTime = fromDateTime || sevenDaysAgo.toISOString();
+    const effectiveToDateTime = toDateTime || now.toISOString();
+
     const normalizedEmail = emailAddress.toLowerCase();
-    const matchingCalls = response.calls.filter(call => {
-      if (!call.parties || call.parties.length === 0) {
-        return false;
+    const matchingCalls: GongCall[] = [];
+    let cursor: string | undefined = undefined;
+
+    // Fetch all pages using cursor pagination
+    do {
+      const requestBody: any = {
+        filter: {
+          fromDateTime: effectiveFromDateTime,
+          toDateTime: effectiveToDateTime
+        },
+        contentSelector: {
+          exposedFields: {
+            parties: true
+          }
+        }
+      };
+
+      // Add cursor if we have one (for subsequent pages)
+      if (cursor) {
+        requestBody.cursor = cursor;
       }
-      return call.parties.some(party =>
-        party.emailAddress && party.emailAddress.toLowerCase() === normalizedEmail
-      );
-    });
+
+      const response = await this.request<GongExtensiveCallsResponse>('POST', '/calls/extensive', undefined, requestBody);
+
+      // Filter calls by email address and transform to GongCall format
+      for (const callData of response.calls) {
+        if (!callData.parties || callData.parties.length === 0) {
+          continue;
+        }
+
+        const hasMatch = callData.parties.some(party =>
+          party.emailAddress && party.emailAddress.toLowerCase() === normalizedEmail
+        );
+
+        if (hasMatch) {
+          // Return only essential fields to keep response size minimal
+          const metadata = callData.metaData;
+          matchingCalls.push({
+            id: metadata.id,
+            title: metadata.title,
+            scheduled: metadata.scheduled,
+            started: metadata.started,
+            duration: metadata.duration,
+            url: metadata.url,
+            direction: metadata.direction,
+            system: metadata.system,
+            scope: metadata.scope,
+            media: metadata.media,
+            language: metadata.language,
+            parties: callData.parties
+          });
+        }
+      }
+
+      // Update cursor for next iteration
+      cursor = response.records.cursor;
+
+    } while (cursor); // Continue while there are more pages
 
     return matchingCalls;
   }
@@ -339,7 +407,7 @@ const GET_CALLS_TOOL: Tool = {
 
 const GET_CALLS_FOR_EMAIL_TOOL: Tool = {
   name: "get_calls_for_email",
-  description: "Retrieve Gong calls where a specific email address participated, with optional date range filtering. Returns full call details including title, participants, duration, and other call metadata. Uses the same API endpoint as list_calls and filters results client-side for the email address.",
+  description: "Retrieve Gong calls where a specific email address participated, with optional date range filtering. Returns essential call details including title, participants, duration, and URL. Uses the /calls/extensive API endpoint with date range filtering and filters results client-side for the email address. Defaults to searching the last 7 days if no date range is provided.",
   inputSchema: {
     type: "object",
     properties: {
