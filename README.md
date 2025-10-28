@@ -1,5 +1,7 @@
 # Gong MCP Server
 
+**This is a fork of https://github.com/kenazk/gong-mcp and contains new features. It may diverge over time.**
+
 A Model Context Protocol (MCP) server that provides access to Gong's API for retrieving call recordings and transcripts. This server allows Claude to interact with Gong data through a standardized interface.
 
 ## Features
