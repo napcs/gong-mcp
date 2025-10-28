@@ -30,6 +30,16 @@ if (!GONG_ACCESS_KEY || !GONG_ACCESS_SECRET) {
 }
 
 // Type definitions
+interface GongParty {
+  id?: string;
+  emailAddress?: string;
+  name?: string;
+  title?: string;
+  speakerId?: string;
+  affiliation?: string;
+  methods?: string[];
+}
+
 interface GongCall {
   id: string;
   title: string;
@@ -42,6 +52,7 @@ interface GongCall {
   media?: string;
   language?: string;
   url?: string;
+  parties?: GongParty[];
 }
 
 interface GongTranscript {
@@ -77,20 +88,20 @@ interface GongGetCallsArgs {
 
 interface GongGetCallsForEmailArgs {
   emailAddress: string;
+  fromDateTime?: string;
+  toDateTime?: string;
 }
 
-interface GongDataForEmailResponse {
-  requestId: string;
-  emails: unknown[];
-  calls: Array<{
+interface GongCallsWithMissing {
+  calls: GongCall[];
+  missing: Array<{
     id: string;
-    status: string;
-    externalSystems: unknown[];
+    reason: string;
   }>;
-  meetings: unknown[];
-  customerData: unknown[];
-  customerEngagement: unknown[];
+  summary: string;
 }
+
+type GongCallsResult = GongCall | GongCall[] | GongCallsWithMissing;
 
 // Gong API Client
 class GongClient {
@@ -166,7 +177,7 @@ class GongClient {
     });
   }
 
-  async getCalls(ids: string | string[]): Promise<GongCall | GongCall[]> {
+  async getCalls(ids: string | string[]): Promise<GongCallsResult> {
     if (typeof ids === 'string') {
       try {
         return await this.request<GongCall>('GET', `/calls/${ids}`);
@@ -188,14 +199,14 @@ class GongClient {
         // Return structured error for single calls
         return {
           calls: [],
-          skipped: [{ id: ids, reason }],
-          summary: `Retrieved 0 calls, skipped 1 calls`
-        } as any;
+          missing: [{ id: ids, reason }],
+          summary: `Retrieved 0 calls, 1 call missing`
+        };
       }
     }
     
     const results: GongCall[] = [];
-    const skipped: Array<{id: string, reason: string}> = [];
+    const missing: Array<{id: string, reason: string}> = [];
     
     // Fetch calls sequentially to avoid rate limiting issues
     for (const id of ids) {
@@ -219,26 +230,39 @@ class GongClient {
           reason = error instanceof Error ? error.message : String(error);
         }
         
-        skipped.push({ id, reason });
+        missing.push({ id, reason });
       }
     }
     
-    // Return results with information about skipped calls
-    if (skipped.length > 0) {
-      const resultWithSkipped = {
+    // Return results with information about missing calls
+    if (missing.length > 0) {
+      return {
         calls: results,
-        skipped: skipped,
-        summary: `Retrieved ${results.length} calls, skipped ${skipped.length} calls`
+        missing: missing,
+        summary: `Retrieved ${results.length} calls, ${missing.length} calls missing`
       };
-      return resultWithSkipped as any; // Cast to maintain return type compatibility
     }
-    
+
     return results;
   }
 
-  async getCallsForEmail(emailAddress: string): Promise<GongDataForEmailResponse['calls']> {
-    const response = await this.request<GongDataForEmailResponse>('GET', '/data-privacy/data-for-email-address', { emailAddress });
-    return response.calls;
+  async getCallsForEmail(emailAddress: string, fromDateTime?: string, toDateTime?: string): Promise<GongCall[]> {
+    // Use the same listCalls method that works reliably
+    // Pass through date parameters as-is (no defaults), matching list_calls behavior
+    const response = await this.listCalls(fromDateTime, toDateTime);
+
+    // Filter calls client-side to find those with the matching email
+    const normalizedEmail = emailAddress.toLowerCase();
+    const matchingCalls = response.calls.filter(call => {
+      if (!call.parties || call.parties.length === 0) {
+        return false;
+      }
+      return call.parties.some(party =>
+        party.emailAddress && party.emailAddress.toLowerCase() === normalizedEmail
+      );
+    });
+
+    return matchingCalls;
   }
 }
 
@@ -315,13 +339,21 @@ const GET_CALLS_TOOL: Tool = {
 
 const GET_CALLS_FOR_EMAIL_TOOL: Tool = {
   name: "get_calls_for_email",
-  description: "Retrieve all Gong calls associated with a specific email address. Returns call IDs, status, and external system information for meeting preparation.",
+  description: "Retrieve Gong calls where a specific email address participated, with optional date range filtering. Returns full call details including title, participants, duration, and other call metadata. Uses the same API endpoint as list_calls and filters results client-side for the email address.",
   inputSchema: {
     type: "object",
     properties: {
       emailAddress: {
         type: "string",
         description: "The email address to retrieve associated calls for"
+      },
+      fromDateTime: {
+        type: "string",
+        description: "Start date/time in ISO format (e.g. 2024-03-01T00:00:00Z)"
+      },
+      toDateTime: {
+        type: "string",
+        description: "End date/time in ISO format (e.g. 2024-03-31T23:59:59Z)"
       }
     },
     required: ["emailAddress"]
@@ -355,22 +387,23 @@ function isGongRetrieveTranscriptsArgs(args: unknown): args is GongRetrieveTrans
   if (typeof args !== "object" || args === null || !("callIds" in args)) {
     return false;
   }
-  
-  let callIds = (args as any).callIds;
-  
+
+  const argsWithCallIds = args as { callIds: unknown };
+  let callIds = argsWithCallIds.callIds;
+
   // Handle case where Claude sends JSON-encoded strings
   if (typeof callIds === "string") {
     try {
       const parsed = JSON.parse(callIds);
       if (Array.isArray(parsed)) {
         callIds = parsed;
-        (args as any).callIds = callIds; // Update the original args
+        argsWithCallIds.callIds = callIds; // Update the original args
       }
     } catch {
       // If parsing fails, treat as regular string
     }
   }
-  
+
   return (
     typeof callIds === "string" ||
     (Array.isArray(callIds) && callIds.every((id: unknown) => typeof id === "string"))
@@ -381,22 +414,23 @@ function isGongGetCallsArgs(args: unknown): args is GongGetCallsArgs {
   if (typeof args !== "object" || args === null || !("ids" in args)) {
     return false;
   }
-  
-  let ids = (args as any).ids;
-  
+
+  const argsWithIds = args as { ids: unknown };
+  let ids = argsWithIds.ids;
+
   // Handle case where Claude sends JSON-encoded strings
   if (typeof ids === "string") {
     try {
       const parsed = JSON.parse(ids);
       if (Array.isArray(parsed)) {
         ids = parsed;
-        (args as any).ids = ids; // Update the original args
+        argsWithIds.ids = ids; // Update the original args
       }
     } catch {
       // If parsing fails, treat as regular string
     }
   }
-  
+
   return (
     typeof ids === "string" ||
     (Array.isArray(ids) && ids.every((id: unknown) => typeof id === "string"))
@@ -408,7 +442,9 @@ function isGongGetCallsForEmailArgs(args: unknown): args is GongGetCallsForEmail
     typeof args === "object" &&
     args !== null &&
     "emailAddress" in args &&
-    typeof (args as GongGetCallsForEmailArgs).emailAddress === "string"
+    typeof (args as GongGetCallsForEmailArgs).emailAddress === "string" &&
+    (!("fromDateTime" in args) || typeof (args as GongGetCallsForEmailArgs).fromDateTime === "string") &&
+    (!("toDateTime" in args) || typeof (args as GongGetCallsForEmailArgs).toDateTime === "string")
   );
 }
 
@@ -475,11 +511,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request: { params: { name
         if (!isGongGetCallsForEmailArgs(args)) {
           throw new Error("Invalid arguments for get_calls_for_email");
         }
-        const { emailAddress } = args;
-        const response = await gongClient.getCallsForEmail(emailAddress);
+        const { emailAddress, fromDateTime, toDateTime } = args;
+        const response = await gongClient.getCallsForEmail(emailAddress, fromDateTime, toDateTime);
         return {
-          content: [{ 
-            type: "text", 
+          content: [{
+            type: "text",
             text: JSON.stringify(response, null, 2)
           }],
           isError: false,
