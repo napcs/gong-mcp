@@ -84,7 +84,16 @@ interface GongExtensiveCallsResponse {
 }
 
 interface GongRetrieveTranscriptsResponse {
-  transcripts: GongTranscript[];
+  requestId: string;
+  records: {
+    totalRecords: number;
+    currentPageSize: number;
+    currentPageNumber: number;
+  };
+  callTranscripts: Array<{
+    callId: string;
+    transcript: GongTranscript[];
+  }>;
 }
 
 interface GongListCallsArgs {
@@ -95,6 +104,10 @@ interface GongListCallsArgs {
 
 interface GongRetrieveTranscriptsArgs {
   callIds: string | string[];
+  format?: "text" | "json";
+  includeEntities?: boolean;
+  includeInteractionsSummary?: boolean;
+  includeTrackers?: boolean;
 }
 
 interface GongGetCallsArgs {
@@ -118,6 +131,26 @@ interface GongCallsWithMissing {
 
 type GongCallsResult = GongCall | GongCall[] | GongCallsWithMissing;
 
+// Helper function to convert transcript JSON to plain text format
+function formatTranscriptAsText(response: GongRetrieveTranscriptsResponse): string {
+  const sections: string[] = [];
+
+  for (const callTranscript of response.callTranscripts) {
+    sections.push(`=== Call ID: ${callTranscript.callId} ===\n`);
+
+    for (const segment of callTranscript.transcript) {
+      // Use shortened speaker ID for identification
+      const speakerLabel = `Speaker ${segment.speakerId.slice(0, 8)}`;
+      const text = segment.sentences.map(s => s.text).join(' ');
+      sections.push(`${speakerLabel}: ${text}\n`);
+    }
+
+    sections.push('\n');
+  }
+
+  return sections.join('');
+}
+
 // Gong API Client
 class GongClient {
   private accessKey: string;
@@ -133,7 +166,7 @@ class GongClient {
     const encoder = new TextEncoder();
     const keyData = encoder.encode(this.accessSecret);
     const messageData = encoder.encode(stringToSign);
-    
+
     const cryptoKey = await crypto.subtle.importKey(
       'raw',
       keyData,
@@ -141,20 +174,20 @@ class GongClient {
       false,
       ['sign']
     );
-    
+
     const signature = await crypto.subtle.sign(
       'HMAC',
       cryptoKey,
       messageData
     );
-    
+
     return btoa(String.fromCharCode(...new Uint8Array(signature)));
   }
 
   private async request<T>(method: string, path: string, params?: Record<string, string | undefined>, data?: Record<string, unknown>): Promise<T> {
     const timestamp = new Date().toISOString();
     const url = `${GONG_API_URL}${path}`;
-    
+
     const response = await axios({
       method,
       url,
@@ -180,14 +213,21 @@ class GongClient {
     return this.request<GongListCallsResponse>('GET', '/calls', params);
   }
 
-  async retrieveTranscripts(callIds: string | string[]): Promise<GongRetrieveTranscriptsResponse> {
+  async retrieveTranscripts(
+    callIds: string | string[],
+    options?: {
+      includeEntities?: boolean;
+      includeInteractionsSummary?: boolean;
+      includeTrackers?: boolean;
+    }
+  ): Promise<GongRetrieveTranscriptsResponse> {
     const idsArray = typeof callIds === 'string' ? [callIds] : callIds;
     return this.request<GongRetrieveTranscriptsResponse>('POST', '/calls/transcript', undefined, {
       filter: {
         callIds: idsArray,
-        includeEntities: true,
-        includeInteractionsSummary: true,
-        includeTrackers: true
+        includeEntities: options?.includeEntities ?? false,
+        includeInteractionsSummary: options?.includeInteractionsSummary ?? false,
+        includeTrackers: options?.includeTrackers ?? false
       }
     });
   }
@@ -200,7 +240,7 @@ class GongClient {
         // Handle error gracefully for single calls too
         const statusCode = error?.response?.status || error?.status;
         let reason = 'Unknown error';
-        
+
         if (statusCode === 404) {
           reason = 'Call not found or not accessible (may be scheduled/incomplete)';
         } else if (statusCode === 403) {
@@ -210,7 +250,7 @@ class GongClient {
         } else {
           reason = error instanceof Error ? error.message : String(error);
         }
-        
+
         // Return structured error for single calls
         return {
           calls: [],
@@ -219,10 +259,10 @@ class GongClient {
         };
       }
     }
-    
+
     const results: GongCall[] = [];
     const missing: Array<{id: string, reason: string}> = [];
-    
+
     // Fetch calls sequentially to avoid rate limiting issues
     for (const id of ids) {
       try {
@@ -230,11 +270,11 @@ class GongClient {
         results.push(call);
       } catch (error: any) {
         console.error(`Failed to fetch call ${id}:`, error);
-        
+
         // Handle different error types gracefully
         const statusCode = error?.response?.status || error?.status;
         let reason = 'Unknown error';
-        
+
         if (statusCode === 404) {
           reason = 'Call not found or not accessible (may be scheduled/incomplete)';
         } else if (statusCode === 403) {
@@ -244,11 +284,11 @@ class GongClient {
         } else {
           reason = error instanceof Error ? error.message : String(error);
         }
-        
+
         missing.push({ id, reason });
       }
     }
-    
+
     // Return results with information about missing calls
     if (missing.length > 0) {
       return {
@@ -357,7 +397,7 @@ const LIST_CALLS_TOOL: Tool = {
 
 const RETRIEVE_TRANSCRIPTS_TOOL: Tool = {
   name: "retrieve_transcripts",
-  description: "Retrieve transcripts for one or more call IDs. Returns detailed transcripts including speaker IDs, topics, and timestamped sentences. Accepts either a single call ID or an array of call IDs.",
+  description: "Retrieve transcripts for one or more call IDs. Returns transcripts in plain text format by default to minimize data size and optimize for conversation analysis. Use 'json' format only when you need structured data with timestamps. Accepts either a single call ID or an array of call IDs.",
   inputSchema: {
     type: "object",
     properties: {
@@ -374,6 +414,23 @@ const RETRIEVE_TRANSCRIPTS_TOOL: Tool = {
           }
         ],
         description: "Either a single call ID string or an array of call ID strings"
+      },
+      format: {
+        type: "string",
+        enum: ["text", "json"],
+        description: "Output format. 'text' (default) returns compact plain text transcripts optimized for conversation analysis and summarization. 'json' returns structured data with timestamps and speaker IDs for programmatic processing. Use 'text' for most use cases."
+      },
+      includeEntities: {
+        type: "boolean",
+        description: "Include entity extraction data (only applies to 'json' format, WARNING: significantly increases response size). Defaults to false."
+      },
+      includeInteractionsSummary: {
+        type: "boolean",
+        description: "Include interactions summary data (only applies to 'json' format, WARNING: significantly increases response size). Defaults to false."
+      },
+      includeTrackers: {
+        type: "boolean",
+        description: "Include tracker data (only applies to 'json' format, WARNING: significantly increases response size). Defaults to false."
       }
     },
     required: ["callIds"]
@@ -537,9 +594,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request: { params: { name
         const { fromDateTime, toDateTime } = args;
         const response = await gongClient.listCalls(fromDateTime, toDateTime);
         return {
-          content: [{ 
-            type: "text", 
-            text: JSON.stringify(response, null, 2)
+          content: [{
+            type: "text",
+            text: JSON.stringify(response)
           }],
           isError: false,
         };
@@ -549,12 +606,22 @@ server.setRequestHandler(CallToolRequestSchema, async (request: { params: { name
         if (!isGongRetrieveTranscriptsArgs(args)) {
           throw new Error("Invalid arguments for retrieve_transcripts");
         }
-        const { callIds } = args;
-        const response = await gongClient.retrieveTranscripts(callIds);
+        const { callIds, format = "text", includeEntities, includeInteractionsSummary, includeTrackers } = args;
+        const response = await gongClient.retrieveTranscripts(callIds, {
+          includeEntities,
+          includeInteractionsSummary,
+          includeTrackers
+        });
+
+        // Format response based on requested format
+        const text = format === "text"
+          ? formatTranscriptAsText(response)
+          : JSON.stringify(response);
+
         return {
-          content: [{ 
-            type: "text", 
-            text: JSON.stringify(response, null, 2)
+          content: [{
+            type: "text",
+            text
           }],
           isError: false,
         };
@@ -567,9 +634,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request: { params: { name
         const { ids } = args;
         const response = await gongClient.getCalls(ids);
         return {
-          content: [{ 
-            type: "text", 
-            text: JSON.stringify(response, null, 2)
+          content: [{
+            type: "text",
+            text: JSON.stringify(response)
           }],
           isError: false,
         };
@@ -584,7 +651,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request: { params: { name
         return {
           content: [{
             type: "text",
-            text: JSON.stringify(response, null, 2)
+            text: JSON.stringify(response)
           }],
           isError: false,
         };
@@ -617,4 +684,4 @@ async function runServer() {
 runServer().catch((error) => {
   console.error("Fatal error running server:", error);
   process.exit(1);
-}); 
+});

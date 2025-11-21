@@ -8,10 +8,14 @@ A Model Context Protocol (MCP) server that provides access to Gong's API for ret
 
 - List Gong calls with optional date range filtering
 - Retrieve detailed transcripts for specific calls
+  - Plain text format (default) optimized for minimal data size - 80-90% reduction
+  - JSON format available when structured data with timestamps is needed
+  - Optional metadata flags for entities, interactions, and trackers
 - Get call details by call ID(s)
 - Find calls by participant email address
 - Secure authentication using Gong's API credentials
 - Standardized MCP interface for easy integration with Claude
+- Optimized for Claude Desktop conversation size limits
 
 ## Prerequisites
 
@@ -161,10 +165,23 @@ Retrieves a list of Gong calls with optional date range filtering.
 
 Retrieves detailed transcripts for one or more call IDs. Accepts either a single call ID string or an array of call IDs.
 
+**Output Format:** By default, transcripts are returned in plain text format optimized for minimal data size and conversation analysis. This format converts the JSON structure into a simple "Speaker: dialogue text" format that dramatically reduces data volume (80-90% reduction) and helps avoid conversation size limits in Claude Desktop.
+
+**Format Options:**
+- `format: "text"` (default) - Returns compact plain text transcripts. Recommended for most use cases including summarization, analysis, and conversation review.
+- `format: "json"` - Returns structured data with timestamps and speaker IDs. Use only when you need programmatic access to timestamps or detailed structure.
+
+**Additional Metadata:** When using `format: "json"`, you can optionally include additional data by setting flags to `true`:
+- `includeEntities` - Entity extraction data (WARNING: significantly increases response size)
+- `includeInteractionsSummary` - Interactions summary data (WARNING: significantly increases response size)
+- `includeTrackers` - Tracker data (WARNING: significantly increases response size)
+
+All metadata flags default to `false` to minimize data size.
+
 ```typescript
 {
   name: "retrieve_transcripts",
-  description: "Retrieve transcripts for one or more call IDs. Returns detailed transcripts including speaker IDs, topics, and timestamped sentences. Accepts either a single call ID or an array of call IDs.",
+  description: "Retrieve transcripts for one or more call IDs. Returns transcripts in plain text format by default to minimize data size and optimize for conversation analysis. Use 'json' format only when you need structured data with timestamps. Accepts either a single call ID or an array of call IDs.",
   inputSchema: {
     type: "object",
     properties: {
@@ -181,6 +198,23 @@ Retrieves detailed transcripts for one or more call IDs. Accepts either a single
           }
         ],
         description: "Either a single call ID string or an array of call ID strings"
+      },
+      format: {
+        type: "string",
+        enum: ["text", "json"],
+        description: "Output format. 'text' (default) returns compact plain text transcripts optimized for conversation analysis and summarization. 'json' returns structured data with timestamps and speaker IDs for programmatic processing. Use 'text' for most use cases."
+      },
+      includeEntities: {
+        type: "boolean",
+        description: "Include entity extraction data (only applies to 'json' format, WARNING: significantly increases response size). Defaults to false."
+      },
+      includeInteractionsSummary: {
+        type: "boolean",
+        description: "Include interactions summary data (only applies to 'json' format, WARNING: significantly increases response size). Defaults to false."
+      },
+      includeTrackers: {
+        type: "boolean",
+        description: "Include tracker data (only applies to 'json' format, WARNING: significantly increases response size). Defaults to false."
       }
     },
     required: ["callIds"]
